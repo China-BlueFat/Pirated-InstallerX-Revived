@@ -156,7 +156,18 @@ jobs:
       - name: Install SDK packages
         if: steps.check.outputs.should_build == 'true'
         run: |
-          sdkmanager "platforms;android-37" "build-tools;36.0.0"
+          set -euo pipefail
+          sdkmanager --list > /tmp/sdk-list.txt
+          if grep -q "platforms;android-37.0" /tmp/sdk-list.txt; then
+            PLATFORM_PKG="platforms;android-37.0"
+          elif grep -q "platforms;android-37" /tmp/sdk-list.txt; then
+            PLATFORM_PKG="platforms;android-37"
+          else
+            echo "::error::Neither platforms;android-37.0 nor platforms;android-37 is available in this runner."
+            exit 1
+          fi
+          echo "Using SDK platform package: ${PLATFORM_PKG}"
+          sdkmanager "${PLATFORM_PKG}" "build-tools;36.0.0"
 
       - name: Configure GitHub Packages credentials
         if: steps.check.outputs.should_build == 'true'
