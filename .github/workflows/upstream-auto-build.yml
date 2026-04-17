@@ -173,6 +173,10 @@ jobs:
         if: steps.check.outputs.should_build == 'true'
         shell: bash
         run: |
+          if [[ -z "${{ secrets.GPR_USER }}" || -z "${{ secrets.GPR_KEY }}" ]]; then
+            echo "::error::Missing GPR_USER or GPR_KEY secret. Configure both in repository Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
           mkdir -p ~/.gradle
           {
             echo "gpr.user=${{ secrets.GPR_USER }}"
