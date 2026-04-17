@@ -236,9 +236,29 @@ jobs:
           ./gradlew :app:assembleOnlineStableRelease --no-configuration-cache --refresh-dependencies
 
       - name: Upload APK artifact
+        id: upload_apk
         if: steps.check.outputs.should_build == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: InstallerX-${{ steps.check.outputs.up_sha }}
           path: app/build/outputs/apk/onlineStable/release/*.apk
           if-no-files-found: error
+
+      - name: Notify WeChat via Server酱
+        if: steps.check.outputs.should_build == 'true' && success()
+        env:
+          SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ARTIFACT_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts/${{ steps.upload_apk.outputs.artifact-id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$SERVERCHAN_SENDKEY" ]]; then
+            echo "::warning::SERVERCHAN_SENDKEY is not set, skip WeChat notification."
+            exit 0
+          fi
+          TITLE="InstallerX 自动构建成功"
+          DESP=$'你的 InstallerX 自动构建已完成。\n\n'"仓库: ${{ github.repository }}"$'\n'"上游SHA: ${{ steps.check.outputs.up_sha }}"$'\n'"Run 链接: ${RUN_URL}"$'\n'"Artifact 链接: ${ARTIFACT_URL}"
+          curl -fsS -X POST "https://sctapi.ftqq.com/${SERVERCHAN_SENDKEY}.send" \
+            --data-urlencode "title=${TITLE}" \
+            --data-urlencode "desp=${DESP}"
