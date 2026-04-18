@@ -39,15 +39,20 @@ jobs:
           git fetch upstream --tags --force
           git fetch origin main
 
-          RELEASES_JSON="$(curl -fsSL \
+          RELEASES_JSON_FILE="$(mktemp)"
+          RELEASE_META_FILE="$(mktemp)"
+          curl -fsSL \
             -H 'Accept: application/vnd.github+json' \
             -H "Authorization: Bearer ${API_TOKEN}" \
-            'https://api.github.com/repos/wxxsfxyzm/InstallerX-Revived/releases?per_page=20')"
-          RELEASE_JSON="$(RELEASES_JSON="$RELEASES_JSON" python3 - <<'PY'
+            'https://api.github.com/repos/wxxsfxyzm/InstallerX-Revived/releases?per_page=20' \
+            -o "${RELEASES_JSON_FILE}"
+          python3 - "${RELEASES_JSON_FILE}" "${RELEASE_META_FILE}" <<'PY'
           import json
-          import os
+          import shlex
+          import sys
+          from pathlib import Path
 
-          releases = json.loads(os.environ["RELEASES_JSON"])
+          releases = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
           candidates = [release for release in releases if not release.get("draft")]
           if not candidates:
               raise SystemExit("No non-draft upstream release found from GitHub API response.")
@@ -56,62 +61,40 @@ jobs:
               return release.get("published_at") or release.get("created_at") or ""
 
           latest = max(candidates, key=sort_key)
-          print(json.dumps(latest))
-          PY
-          )"
+          release_id = latest.get("id")
+          release_tag = (latest.get("tag_name") or "").strip()
+          release_name = (latest.get("name") or "").replace("\r", " ").replace("\n", " ").strip()
+          release_url = (latest.get("html_url") or "").strip()
 
-          UP_RELEASE_ID="$(RELEASE_JSON="$RELEASE_JSON" python3 - <<'PY'
-          import json
-          import os
+          if not release_id:
+              raise SystemExit("Missing release id from GitHub API response.")
+          if not release_tag:
+              raise SystemExit("Missing release tag_name from GitHub API response.")
+          if not release_url:
+              raise SystemExit("Missing release html_url from GitHub API response.")
 
-          data = json.loads(os.environ["RELEASE_JSON"])
-          value = data.get("id")
-          if not value:
-            raise SystemExit("Missing release id from GitHub API response.")
-          print(value)
+          meta = {
+              "UP_RELEASE_ID": str(release_id),
+              "UP_RELEASE_TAG": release_tag,
+              "UP_RELEASE_NAME": release_name,
+              "UP_RELEASE_URL": release_url,
+          }
+          with Path(sys.argv[2]).open("w", encoding="utf-8") as fh:
+              for key, value in meta.items():
+                  fh.write(f"{key}={shlex.quote(value)}\n")
           PY
-          )"
-          UP_RELEASE_TAG="$(RELEASE_JSON="$RELEASE_JSON" python3 - <<'PY'
-          import json
-          import os
-
-          data = json.loads(os.environ["RELEASE_JSON"])
-          value = (data.get("tag_name") or "").strip()
-          if not value:
-            raise SystemExit("Missing release tag_name from GitHub API response.")
-          print(value)
-          PY
-          )"
-          UP_RELEASE_NAME="$(RELEASE_JSON="$RELEASE_JSON" python3 - <<'PY'
-          import json
-          import os
-
-          data = json.loads(os.environ["RELEASE_JSON"])
-          value = (data.get("name") or "").replace("\r", " ").replace("\n", " ").strip()
-          print(value)
-          PY
-          )"
-          UP_RELEASE_URL="$(RELEASE_JSON="$RELEASE_JSON" python3 - <<'PY'
-          import json
-          import os
-
-          data = json.loads(os.environ["RELEASE_JSON"])
-          value = (data.get("html_url") or "").strip()
-          if not value:
-            raise SystemExit("Missing release html_url from GitHub API response.")
-          print(value)
-          PY
-          )"
+          . "${RELEASE_META_FILE}"
           UP_SHA="$(git rev-list -n 1 "$UP_RELEASE_TAG")"
           BUILD_RELEASE_TAG="auto-build-release-${UP_RELEASE_ID}"
           EXPECTED_APK_NAME="InstallerX-${UP_SHA}.apk"
           PREVIEW_VERSION_NAME="$(date -u +'%y.%m').${UP_SHA:0:7}"
 
-          EXISTING_BUILD_JSON=""
-          if EXISTING_BUILD_JSON="$(curl -fsSL \
+          EXISTING_BUILD_JSON_FILE="$(mktemp)"
+          if curl -fsSL \
             -H 'Accept: application/vnd.github+json' \
             -H "Authorization: Bearer ${API_TOKEN}" \
-            https://api.github.com/repos/${{ github.repository }}/releases/tags/${BUILD_RELEASE_TAG} 2>/dev/null)"; then
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${BUILD_RELEASE_TAG}" \
+            -o "${EXISTING_BUILD_JSON_FILE}" 2>/dev/null; then
             BUILD_RELEASE_PRESENT=true
           else
             BUILD_RELEASE_PRESENT=false
@@ -119,15 +102,16 @@ jobs:
 
           ASSET_ALREADY_PUBLISHED=false
           if [[ "$BUILD_RELEASE_PRESENT" == "true" ]]; then
-            ASSET_ALREADY_PUBLISHED="$(EXISTING_BUILD_JSON="$EXISTING_BUILD_JSON" EXPECTED_APK_NAME="$EXPECTED_APK_NAME" python3 - <<'PY'
-          import json
-          import os
+            ASSET_ALREADY_PUBLISHED="$(python3 - "${EXISTING_BUILD_JSON_FILE}" "${EXPECTED_APK_NAME}" <<'PY'
+            import json
+            import sys
+            from pathlib import Path
 
-          data = json.loads(os.environ["EXISTING_BUILD_JSON"])
-          expected = os.environ["EXPECTED_APK_NAME"]
-          asset_names = {asset.get("name", "") for asset in data.get("assets", [])}
-          print("true" if expected in asset_names else "false")
-          PY
+            data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+            expected = sys.argv[2]
+            asset_names = {asset.get("name", "") for asset in data.get("assets", [])}
+            print("true" if expected in asset_names else "false")
+            PY
             )"
           fi
 
