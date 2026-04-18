@@ -341,8 +341,8 @@ jobs:
             Upstream release: ${{ steps.check.outputs.up_release_tag }}
             Upstream release page: ${{ steps.check.outputs.up_release_url }}
             Upstream SHA: ${{ steps.check.outputs.up_sha }}
-            Source branch: auto-build
-          target_commitish: auto-build
+            Workflow commit: ${{ github.sha }}
+          target_commitish: ${{ github.sha }}
           files: ${{ steps.prepare_release.outputs.apk_path }}
           fail_on_unmatched_files: true
           prerelease: true
