@@ -345,7 +345,7 @@ jobs:
           target_commitish: ${{ github.sha }}
           files: ${{ steps.prepare_release.outputs.apk_path }}
           fail_on_unmatched_files: true
-          prerelease: true
+          prerelease: false
 
       - name: Notify WeChat via Server酱 (optional)
         if: steps.check.outputs.should_build == 'true' && success()
