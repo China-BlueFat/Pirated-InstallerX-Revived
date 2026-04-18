@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       force_build:
-        description: "Force build even if upstream has no new commit"
+        description: "Force build even if upstream has no new release"
         required: false
         default: "false"
 
@@ -31,24 +31,93 @@ jobs:
       - name: Decide whether to build
         id: check
         shell: bash
+        env:
+          API_TOKEN: ${{ secrets.GH_PAT != '' && secrets.GH_PAT || github.token }}
         run: |
           set -euo pipefail
           git remote add upstream https://github.com/wxxsfxyzm/InstallerX-Revived.git || true
-          git fetch upstream main
+          git fetch upstream --tags --force
           git fetch origin main
-          git fetch origin auto-build || true
 
-          UP_SHA="$(git rev-parse upstream/main)"
-          LAST_UP_SHA=""
-          if git show origin/auto-build:.upstream-sync-sha >/tmp/upsha.txt 2>/dev/null; then
-            LAST_UP_SHA="$(cat /tmp/upsha.txt | tr -d '\r\n')"
+          RELEASE_JSON="$(curl -fsSL \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer ${API_TOKEN}" \
+            https://api.github.com/repos/wxxsfxyzm/InstallerX-Revived/releases/latest)"
+
+          UP_RELEASE_ID="$(RELEASE_JSON="$RELEASE_JSON" python3 - <<'PY'
+          import json
+          import os
+
+          data = json.loads(os.environ["RELEASE_JSON"])
+          value = data.get("id")
+          if not value:
+            raise SystemExit("Missing release id from GitHub API response.")
+          print(value)
+          PY
+          )"
+          UP_RELEASE_TAG="$(RELEASE_JSON="$RELEASE_JSON" python3 - <<'PY'
+          import json
+          import os
+
+          data = json.loads(os.environ["RELEASE_JSON"])
+          value = (data.get("tag_name") or "").strip()
+          if not value:
+            raise SystemExit("Missing release tag_name from GitHub API response.")
+          print(value)
+          PY
+          )"
+          UP_RELEASE_NAME="$(RELEASE_JSON="$RELEASE_JSON" python3 - <<'PY'
+          import json
+          import os
+
+          data = json.loads(os.environ["RELEASE_JSON"])
+          value = (data.get("name") or "").replace("\r", " ").replace("\n", " ").strip()
+          print(value)
+          PY
+          )"
+          UP_RELEASE_URL="$(RELEASE_JSON="$RELEASE_JSON" python3 - <<'PY'
+          import json
+          import os
+
+          data = json.loads(os.environ["RELEASE_JSON"])
+          value = (data.get("html_url") or "").strip()
+          if not value:
+            raise SystemExit("Missing release html_url from GitHub API response.")
+          print(value)
+          PY
+          )"
+          UP_SHA="$(git rev-list -n 1 "$UP_RELEASE_TAG")"
+          BUILD_RELEASE_TAG="auto-build-release-${UP_RELEASE_ID}"
+          EXPECTED_APK_NAME="InstallerX-${UP_SHA}.apk"
+
+          EXISTING_BUILD_JSON=""
+          if EXISTING_BUILD_JSON="$(curl -fsSL \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer ${API_TOKEN}" \
+            https://api.github.com/repos/${{ github.repository }}/releases/tags/${BUILD_RELEASE_TAG} 2>/dev/null)"; then
+            BUILD_RELEASE_PRESENT=true
+          else
+            BUILD_RELEASE_PRESENT=false
           fi
 
-          CHANGED=false
-          if [[ "$UP_SHA" != "$LAST_UP_SHA" ]]; then
-            CHANGED=true
+          ASSET_ALREADY_PUBLISHED=false
+          if [[ "$BUILD_RELEASE_PRESENT" == "true" ]]; then
+            ASSET_ALREADY_PUBLISHED="$(EXISTING_BUILD_JSON="$EXISTING_BUILD_JSON" EXPECTED_APK_NAME="$EXPECTED_APK_NAME" python3 - <<'PY'
+          import json
+          import os
+
+          data = json.loads(os.environ["EXISTING_BUILD_JSON"])
+          expected = os.environ["EXPECTED_APK_NAME"]
+          asset_names = {asset.get("name", "") for asset in data.get("assets", [])}
+          print("true" if expected in asset_names else "false")
+          PY
+            )"
           fi
 
+          CHANGED=true
+          if [[ "$ASSET_ALREADY_PUBLISHED" == "true" ]]; then
+            CHANGED=false
+          fi
           FORCE="${{ github.event.inputs.force_build || 'false' }}"
           SHOULD_BUILD="$CHANGED"
           if [[ "$FORCE" == "true" ]]; then
@@ -56,7 +125,14 @@ jobs:
           fi
 
           echo "up_sha=$UP_SHA" >> "$GITHUB_OUTPUT"
-          echo "last_up_sha=$LAST_UP_SHA" >> "$GITHUB_OUTPUT"
+          echo "up_release_id=$UP_RELEASE_ID" >> "$GITHUB_OUTPUT"
+          echo "up_release_tag=$UP_RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "up_release_name=$UP_RELEASE_NAME" >> "$GITHUB_OUTPUT"
+          echo "up_release_url=$UP_RELEASE_URL" >> "$GITHUB_OUTPUT"
+          echo "build_release_tag=$BUILD_RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "expected_apk_name=$EXPECTED_APK_NAME" >> "$GITHUB_OUTPUT"
+          echo "build_release_present=$BUILD_RELEASE_PRESENT" >> "$GITHUB_OUTPUT"
+          echo "asset_already_published=$ASSET_ALREADY_PUBLISHED" >> "$GITHUB_OUTPUT"
           echo "changed=$CHANGED" >> "$GITHUB_OUTPUT"
           echo "force=$FORCE" >> "$GITHUB_OUTPUT"
           echo "should_build=$SHOULD_BUILD" >> "$GITHUB_OUTPUT"
@@ -64,14 +140,14 @@ jobs:
       - name: Skip summary
         if: steps.check.outputs.should_build != 'true'
         run: |
-          echo "No new upstream commit and force_build=false. Skip build."
+          echo "Build release ${{ steps.check.outputs.build_release_tag }} already contains ${{ steps.check.outputs.expected_apk_name }}. Skip build."
 
       - name: Sync auto-build branch from upstream
         if: steps.check.outputs.should_build == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          git checkout -B auto-build upstream/main
+          git checkout -B auto-build "${{ steps.check.outputs.up_sha }}"
 
       - name: Apply your custom files from origin/main
         if: steps.check.outputs.should_build == 'true'
@@ -165,6 +241,8 @@ jobs:
           PY
 
           echo "${{ steps.check.outputs.up_sha }}" > .upstream-sync-sha
+          echo "${{ steps.check.outputs.up_release_id }}" > .upstream-release-id
+          echo "${{ steps.check.outputs.up_release_tag }}" > .upstream-release-tag
           git add -A
           # Do not include workflow file updates in auto-build commits, otherwise
           # GITHUB_TOKEN push may be rejected with missing "workflows" permission.
@@ -173,7 +251,7 @@ jobs:
             echo "No overlay changes to commit."
           else
             git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-              commit -m "auto-build: sync upstream ${{ steps.check.outputs.up_sha }}"
+              commit -m "auto-build: sync upstream release ${{ steps.check.outputs.up_release_tag }} (${{ steps.check.outputs.up_sha }})"
           fi
           # Keep build unblocked even if auto-build branch push is not allowed
           # by GITHUB_TOKEN workflow-file restrictions.
@@ -235,30 +313,59 @@ jobs:
         run: |
           ./gradlew :app:assembleOnlineStableRelease --no-configuration-cache --refresh-dependencies
 
-      - name: Upload APK artifact
-        id: upload_apk
+      - name: Prepare release asset
+        id: prepare_release
         if: steps.check.outputs.should_build == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: InstallerX-${{ steps.check.outputs.up_sha }}
-          path: app/build/outputs/apk/onlineStable/release/*.apk
-          if-no-files-found: error
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK_PATH="$(find app/build/outputs/apk/onlineStable/release -maxdepth 1 -type f -name '*.apk' | head -n 1)"
+          if [[ -z "$APK_PATH" ]]; then
+            echo "::error::No APK found under app/build/outputs/apk/onlineStable/release."
+            exit 1
+          fi
+          mkdir -p release-assets
+          RELEASE_APK="release-assets/InstallerX-${{ steps.check.outputs.up_sha }}.apk"
+          cp "$APK_PATH" "$RELEASE_APK"
+          echo "apk_path=${RELEASE_APK}" >> "$GITHUB_OUTPUT"
+          echo "apk_name=$(basename "$RELEASE_APK")" >> "$GITHUB_OUTPUT"
 
-      - name: Notify WeChat via Server酱
+      - name: Publish APK release
+        id: publish_release
+        if: steps.check.outputs.should_build == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GH_PAT != '' && secrets.GH_PAT || github.token }}
+          tag_name: ${{ steps.check.outputs.build_release_tag }}
+          name: InstallerX Auto Build ${{ steps.check.outputs.up_release_tag }}
+          body: |
+            Automated APK build for ${{ github.repository }}.
+
+            Upstream release: ${{ steps.check.outputs.up_release_tag }}
+            Upstream release page: ${{ steps.check.outputs.up_release_url }}
+            Upstream SHA: ${{ steps.check.outputs.up_sha }}
+            Source branch: auto-build
+          target_commitish: auto-build
+          files: ${{ steps.prepare_release.outputs.apk_path }}
+          fail_on_unmatched_files: true
+          prerelease: true
+
+      - name: Notify WeChat via Server酱 (optional)
         if: steps.check.outputs.should_build == 'true' && success()
         env:
           SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
-          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          ARTIFACT_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts/${{ steps.upload_apk.outputs.artifact-id }}
+          RELEASE_URL: ${{ steps.publish_release.outputs.url }}
+          APK_URL: ${{ fromJSON(steps.publish_release.outputs.assets)[0].browser_download_url }}
+          APK_NAME: ${{ steps.prepare_release.outputs.apk_name }}
         shell: bash
         run: |
           set -euo pipefail
           if [[ -z "$SERVERCHAN_SENDKEY" ]]; then
-            echo "::warning::SERVERCHAN_SENDKEY is not set, skip WeChat notification."
+            echo "::notice::SERVERCHAN_SENDKEY is not set; build succeeded, so WeChat notification was skipped."
             exit 0
           fi
           TITLE="InstallerX 自动构建成功"
-          DESP=$'你的 InstallerX 自动构建已完成。\n\n'"仓库: ${{ github.repository }}"$'\n'"上游SHA: ${{ steps.check.outputs.up_sha }}"$'\n'"Run 链接: ${RUN_URL}"$'\n'"Artifact 链接: ${ARTIFACT_URL}"
+          DESP=$'你的 InstallerX 自动构建已完成。\n\n'"仓库: ${{ github.repository }}"$'\n'"上游Release: ${{ steps.check.outputs.up_release_tag }}"$'\n'"上游SHA: ${{ steps.check.outputs.up_sha }}"$'\n'"Release 链接: ${RELEASE_URL}"$'\n'"APK 下载: ${APK_URL}"$'\n'"APK 文件: ${APK_NAME}"
           curl -fsS -X POST "https://sctapi.ftqq.com/${SERVERCHAN_SENDKEY}.send" \
             --data-urlencode "title=${TITLE}" \
             --data-urlencode "desp=${DESP}"
